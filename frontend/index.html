@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Order Tracker & Live Support</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root { --bg:#f5f6fa; --card:#fff; --text:#1f2430; --muted:#6b7280; --accent:#4f46e5; --border:#e5e7eb; }
+  @media (prefers-color-scheme: dark){ :root{ --bg:#111318; --card:#1b1e26; --text:#e8eaf0; --muted:#9aa1b0; --border:#2b303b; } }
+  *{box-sizing:border-box} body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text)}
+  header{padding:14px 20px;background:var(--accent);color:#fff;display:flex;justify-content:space-between;align-items:center}
+  main{display:grid;gap:16px;padding:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}
+  h2{margin:0 0 10px;font-size:16px}
+  input,select,button{padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);font:inherit}
+  button{background:var(--accent);color:#fff;border:none;cursor:pointer} button.danger{background:#dc2626}
+  .row{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap;align-items:center}
+  .order{border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:8px}
+  .badge{padding:2px 8px;border-radius:99px;font-size:12px;background:var(--border)}
+  #chatlog,#alerts{height:180px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px;font-size:13px}
+  .muted{color:var(--muted);font-size:12px} .warning{color:#d97706} .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#dc2626}
+  .dot.on{background:#16a34a}
+</style>
+</head>
+<body>
+<header><strong>Order Tracker & Live Support</strong><span><span id="dot" class="dot"></span> <span id="conn">connecting…</span></span></header>
+<main>
+  <section>
+    <h2>1. Catalog (REST) → Place order</h2>
+    <div class="row"><input id="cname" placeholder="Your name" /></div>
+    <div id="catalog"></div>
+    <div class="row"><button onclick="placeOrder()">Place Order</button></div>
+  </section>
+
+  <section>
+    <h2>2. Orders (live via WebSocket)</h2>
+    <div class="row"><label>View as:
+      <select id="role" onchange="renderOrders()"><option value="customer">Customer</option><option value="agent">Support Agent</option></select></label></div>
+    <div id="orders"></div>
+  </section>
+
+  <section>
+    <h2>3. Live Chat (Socket.io)</h2>
+    <div class="row"><input id="chatname" placeholder="Display name" />
+      <select id="chatorder"></select><button onclick="joinChat()">Join</button></div>
+    <div id="chatlog"></div><div id="typing" class="muted"></div>
+    <div class="row"><input id="chatinput" placeholder="Type a message…" style="flex:1" oninput="socket.emit('chat:typing')" onkeydown="if(event.key==='Enter')sendChat()" /><button onclick="sendChat()">Send</button></div>
+    <div class="muted">Open two tabs: one as Customer, one as Support Agent, and join the same order.</div>
+  </section>
+
+  <section>
+    <h2>4. System Alerts (SSE)</h2>
+    <div id="alerts"></div>
+  </section>
+</main>
+
+<script>
+// 👉 Change this to your deployed Render/Railway URL before deploying the frontend
+const API = window.BACKEND_URL || "http://localhost:4000";
+const $ = id => document.getElementById(id);
+let orders = {};
+const STATUSES = ["PLACED","PROCESSING","SHIPPED","DELIVERED","CANCELLED"];
+
+// ----- REST -----
+async function loadCatalog(){
+  const items = await (await fetch(`${API}/api/v1/catalog`)).json();
+  $("catalog").innerHTML = items.map(p =>
+    `<div class="row"><span style="flex:1">${p.name} — Rs ${p.price}</span>
+     <input type="number" min="0" value="0" data-id="${p.id}" style="width:60px" /></div>`).join("");
+}
+async function loadOrders(){
+  (await (await fetch(`${API}/api/v1/orders`)).json()).forEach(o => orders[o.id] = o);
+  renderOrders();
+}
+async function placeOrder(){
+  const items = [...document.querySelectorAll("#catalog input")].filter(i => +i.value > 0)
+    .map(i => ({ productId:+i.dataset.id, qty:+i.value }));
+  const res = await fetch(`${API}/api/v1/orders`, { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ customerName: $("cname").value.trim(), items }) });
+  if(!res.ok) return alert((await res.json()).error);
+  document.querySelectorAll("#catalog input").forEach(i => i.value = 0);
+}
+async function setStatus(id, status){
+  await fetch(`${API}/api/v1/orders/${id}/status`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ status }) });
+}
+
+// ----- JSON-RPC -----
+async function cancelOrder(orderId){
+  const res = await fetch(`${API}/rpc`, { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ jsonrpc:"2.0", method:"cancelOrder", params:{ orderId }, id: Date.now() }) });
+  const data = await res.json();
+  if(data.error) alert(`RPC error ${data.error.code}: ${data.error.message}`);
+}
+
+function renderOrders(){
+  const agent = $("role").value === "agent";
+  const list = Object.values(orders).reverse();
+  $("orders").innerHTML = list.length ? list.map(o => `
+    <div class="order"><b>${o.id}</b> · ${o.customerName} · Rs ${o.total}
+      <span class="badge">${o.status}</span>
+      <div class="muted">${o.items.map(i => `${i.qty}× ${i.name}`).join(", ")}</div>
+      <div class="row">
+        ${agent ? `<select onchange="setStatus('${o.id}', this.value)">${STATUSES.map(s => `<option ${s===o.status?"selected":""}>${s}</option>`).join("")}</select>`
+                : `<button class="danger" onclick="cancelOrder('${o.id}')">Cancel (JSON-RPC)</button>`}
+      </div></div>`).join("") : `<div class="muted">No orders yet.</div>`;
+  const sel = $("chatorder"), cur = sel.value;
+  sel.innerHTML = list.map(o => `<option value="${o.id}">${o.id}</option>`).join("");
+  if (cur) sel.value = cur;
+}
+
+// ----- Socket.io -----
+const socket = io(API, { transports: ["websocket", "polling"] });
+socket.on("connect", () => { $("dot").classList.add("on"); $("conn").textContent = "live"; });
+socket.on("disconnect", () => { $("dot").classList.remove("on"); $("conn").textContent = "disconnected"; });
+socket.on("order:created", o => { orders[o.id] = o; renderOrders(); });
+socket.on("order:status_update", o => { orders[o.id] = o; renderOrders(); });
+
+function addChat(html){ const l = $("chatlog"); l.insertAdjacentHTML("beforeend", `<div>${html}</div>`); l.scrollTop = l.scrollHeight; }
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = m => `<b>${esc(m.from)}</b> <span class="muted">(${m.role})</span>: ${esc(m.text)}`;
+function joinChat(){
+  const room = $("chatorder").value; if(!room) return alert("Place an order first");
+  $("chatlog").innerHTML = "";
+  socket.emit("chat:join", { room, role: $("role").value, name: $("chatname").value.trim() || "Guest" });
+}
+function sendChat(){ const t = $("chatinput").value; if(!t.trim()) return; socket.emit("chat:message", { text:t }); $("chatinput").value = ""; }
+socket.on("chat:history", h => h.forEach(m => addChat(fmt(m))));
+socket.on("chat:message", m => { addChat(fmt(m)); $("typing").textContent = ""; });
+socket.on("chat:system", m => addChat(`<i class="muted">${esc(m.text)}</i>`));
+let tt; socket.on("chat:typing", ({name}) => { $("typing").textContent = `${name} is typing…`; clearTimeout(tt); tt = setTimeout(() => $("typing").textContent = "", 1500); });
+
+// ----- SSE -----
+const es = new EventSource(`${API}/events`);
+es.addEventListener("alert", e => {
+  const a = JSON.parse(e.data), box = $("alerts");
+  box.insertAdjacentHTML("beforeend", `<div class="${a.level}"><span class="muted">${new Date(a.time).toLocaleTimeString()}</span> ${esc(a.message)}</div>`);
+  box.scrollTop = box.scrollHeight;
+});
+
+loadCatalog(); loadOrders();
+</script>
+</body>
+</html>

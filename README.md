@@ -14,8 +14,8 @@
 
 | Component | URL |
 |-----------|-----|
-|  Frontend (Vercel) | `https://<your-app>.vercel.app` |
-|  Backend (Render) | `https://<your-api>.onrender.com` |
+|  Frontend (Vercel) | `https://<https://order-tracker-frontend-rose.vercel.app/>` |
+|  Backend (Render) | `https://<https://order-tracker-6nnu.onrender.com/>` |
 
 ##  Project Overview
 
